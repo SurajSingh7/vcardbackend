@@ -10,6 +10,8 @@ const User = require("./models/User");
 dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 5000;
+
 app.use(cors());
 app.use(express.json());
 
@@ -115,5 +117,12 @@ async function scheduleAllVcards() {
   }
 }
 
-const PORT = process.env.PORT || 5000;
+// Root Route
+app.get('/', (req, res) => {
+  return res.json({
+    success: true,
+    message: 'Your server is up and running....💕',
+  });
+});
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
