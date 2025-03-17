@@ -106,8 +106,8 @@ async function sendWhatsApp(vcard) {
 let retryCount = 0;
 const MAX_RETRIES = 3;
 
-// Cron Job at 8:00 AM
-schedule.scheduleJob("13 16 * * *", async () => {
+// Cron Job at 8:30 AM
+schedule.scheduleJob("30 8 * * *", async () => {
   console.log("⏳ Running WhatsApp notification job at 11:00 AM...");
   await processVcards();
   retryFailedMessages(); 
