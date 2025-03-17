@@ -5,7 +5,7 @@ const cors = require("cors");
 const axios = require("axios");
 const schedule = require("node-schedule");
 const Vcard = require("./models/Vcard");
-const User = require("./models/User"); 
+const User = require("./models/User");
 
 dotenv.config();
 
@@ -17,112 +17,133 @@ app.use(express.json());
 
 // Connect to MongoDB
 mongoose
-  .connect(process.env.MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => {
-    console.log("MongoDB Connected");
+  .connect(process.env.MONGO_URI, {})
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch((err) => console.error("❌ MongoDB Connection Error:", err.message));
 
-    // Schedule scheduleAllVcards() to run daily at 8:00 AM IST
-    const rule = new schedule.RecurrenceRule();
-    rule.hour = 8;
-    rule.minute = 0;
-    rule.tz = "Asia/Kolkata"; // Set timezone to Indian Standard Time
+//Fetch Vcards for Today
+async function fetchVcardsForToday() {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(today);
+    endOfDay.setHours(23, 59, 59, 999);
 
-    schedule.scheduleJob(rule, () => {
-      console.log("Running scheduleAllVcards job at 8:00 AM IST");
-      scheduleAllVcards();
-    });
-   
-  })
-  .catch((err) => console.error("MongoDB Connection Error:", err));
+    return await Vcard.find({ sedulertime: { $gte: today, $lt: endOfDay }, whatsapp: false });
+  } catch (error) {
+    console.error("❌ Error fetching vcards:", error.message);
+    return [];
+  }
+}
 
-/**
- * Schedule a job for a given vcard.
- * At the scheduled sedulertime, the job posts data to the WHATSAPP API
- * and then updates the vcard's whatsapp field to true.
- */
-function scheduleVcard(vcard) {
-  const scheduledDate = new Date(vcard.sedulertime);
+// Process Vcards
+async function processVcards() {
+  try {
+    const vcards = await fetchVcardsForToday();
+    if (vcards.length === 0) {
+      console.log("✅ No vcards found for today.");
+      return;
+    }
 
-  // If the scheduled date is in the past, skip scheduling
-  if (scheduledDate <= new Date()) {
-    console.log(`Skipping scheduling for vcard ${vcard._id} as sedulertime is in the past. 49`);
+    for (const vcard of vcards) {
+      const user = await User.findOne({ userName: vcard.assignTo });
+      const phoneNumber = user?.mobile || null;
+      if (!phoneNumber) {
+        console.log(`⚠ No phone number found for ${vcard.assignTo}, skipping.`);
+        continue;
+      }
+
+      await sendWhatsApp({
+        id: vcard._id,
+        name: vcard.name,
+        userPhoneNumber: vcard.contactNumber,
+        phoneNumber,
+        sedulertime: vcard.sedulertime,
+        note: vcard.note,
+        assignedPerson: vcard.assignTo,
+      });
+
+      // ✅ Delay of 3 seconds between messages
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+  } catch (error) {
+    console.error("❌ Error processing vcards:", error.message);
+  }
+}
+
+// Send WhatsApp Message
+async function sendWhatsApp(vcard) {
+  try {
+    const parseTime = new Date(vcard.sedulertime).toISOString().split("T")[0];
+    const message = `Dear *${vcard.assignedPerson}*,\n\nThis is a reminder that your appointment is scheduled on *${parseTime}*.\n\nCustomer contact number is ${vcard.userPhoneNumber}.`;
+
+    const payload = {
+      apiToken: process.env.WHATSAPP_API_TOKEN,
+      message,
+      phoneNumber: vcard.phoneNumber,
+      source: "vcard",
+    };
+
+    console.log("📤 Sending WhatsApp message:", payload);
+    const response = await axios.post(process.env.WHATSAPP_API_URL, payload);
+    console.log(`📩 WhatsApp sent to ${vcard.phoneNumber}:`, response.data);
+
+    if (response.data.success) {
+      try {
+        await Vcard.findByIdAndUpdate(vcard.id, { whatsapp: true, updatedAt: new Date() });
+      } catch (updateError) {
+        console.error(`❌ Error updating vcard ${vcard.id}:`, updateError.message);
+      }
+    } else {
+      console.error("❌ WhatsApp API Error:", response.data.message);
+    }
+  } catch (error) {
+    console.error("❌ Error sending WhatsApp:", error.message);
+  }
+}
+
+// Track retry attempts
+let retryCount = 0;
+const MAX_RETRIES = 3;
+
+// Cron Job at 8:00 AM
+schedule.scheduleJob("13 16 * * *", async () => {
+  console.log("⏳ Running WhatsApp notification job at 11:00 AM...");
+  await processVcards();
+  retryFailedMessages(); 
+});
+
+// Retry Failed Messages (with max 3 attempts)
+async function retryFailedMessages() {
+  if (retryCount >= MAX_RETRIES) {
+    console.error("❌ Max retries reached. Some messages were not sent.");
     return;
   }
 
-  console.log(`Scheduling vcard ${vcard._id} for ${scheduledDate}`);
-  // console.log(`Scheduling vcard ${vcard} for ${scheduledDate}`);
+  const pendingMessages = await fetchVcardsForToday();
 
-  schedule.scheduleJob(scheduledDate, async () => {
-    try {
-      // const scheduledDateFormatted = scheduledDate.toLocaleString('en-IN');
-      const scheduledDateFormatted = scheduledDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'numeric', year: 'numeric' });
+  if (pendingMessages.length > 0) {
+    retryCount++;
+    console.log(`⚠ Retrying failed messages in 1 hour... (Attempt ${retryCount}/${MAX_RETRIES})`);
+
+    setTimeout(async () => {
+      await processVcards();
+
+      const remainingMessages = await fetchVcardsForToday();
       
-      const message = vcard.contactNumber
-      ? `Dear *${vcard.name}*,\n\nthis is a reminder that your appointment is scheduled on *${scheduledDateFormatted}*.\n\n Customer contact number is ${vcard.contactNumber}.`
-      : `Dear *${vcard.name}*,\n\nthis is a reminder that your appointment is scheduled on *${scheduledDateFormatted}*.`;
-    
-      const assignTo = vcard.assignTo;
-      let phoneNumber = "919695215220"; // default number
-      
-      // If assignTo is provided, try fetching the user's mobile number from the users collection.
-      if (assignTo) {
-        const user = await User.findOne({ userName: assignTo });
-        if (user && user.mobile) {
-          phoneNumber = user.mobile;
-        } else {
-          console.log(`User not found or no mobile for assignTo ${assignTo}, using default number.`);
-        }
+      if (remainingMessages.length === 0) {
+        console.log("✅ All WhatsApp messages sent successfully!");
+      } else {
+        retryFailedMessages();
       }
-
-      // Prepare new payload for the WHATSAPP API using env variables for API token and URL
-      const newPayload = {
-        apiToken: process.env.WHATSAPP_API_TOKEN,
-        message: message,
-        phoneNumber: phoneNumber,
-        source: "vcard"
-      };
-
-      
-      // Make POST request to new WHATSAPP API
-      const response = await axios.post(
-        process.env.WHATSAPP_API_URL,
-        newPayload
-      );
-
-  
-      console.log(`WHATSAPP API response for vcard ......... ${vcard._id}:`, response.data);
-
-      // Update the record in MongoDB (set whatsapp to true)
-      await Vcard.findByIdAndUpdate(vcard._id, { whatsapp: true, updatedAt: new Date() });
-      console.log(`Updated vcard ${vcard._id} to set whatsapp true.`);
-    } catch (error) {
-      console.error(`Error processing vcard ${vcard._id}:`, error.message);
-    }
-  });
-}
-
-/**
- * Fetch all vcards that haven't been processed (whatsapp is false)
- * and schedule a job for each.
- */
-async function scheduleAllVcards() {
-  try {
-    const vcards = await Vcard.find({ whatsapp: false });
-    vcards.forEach((vcard) => scheduleVcard(vcard));
-  } catch (error) {
-    console.error("Error fetching vcards for scheduling:", error.message);
+    }, 60 * 60 * 1000); // 1 hour delay
+  } else {
+    console.log("✅ No retries needed, all messages sent successfully!");
   }
 }
 
-// Root Route
-app.get('/', (req, res) => {
-  return res.json({
-    success: true,
-    message: 'Your server is up and running....💕',
-  });
-});
+// API Test Route
+app.get("/", (req, res) => res.json({ success: true, message: "Server is running" }));
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Start Server
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
